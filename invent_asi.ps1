@@ -129,20 +129,69 @@ Write-Log "Arquivo de softwares gerado: $ArquivoSoftwares" "OK"
 # ==================================================================================================
 Write-Log "Coletando informacoes do sistema operacional..." "INFO"
 
-"NOME_DA_MAQUINA;NOME_SO;VERSAO;FABRICANTE;DATA_INSTALACAO;PRODUCT_ID" |
+"NOME_DA_MAQUINA;WINDOWS_FAMILY;NOME_SO;DISPLAY_VERSION;VERSION;BUILD_COMPLETO;ARQUITETURA;EDITION_ID;INSTALLATION_TYPE;DATA_INSTALACAO;PRODUCT_ID" |
     Out-File -Encoding UTF8 $ArquivoSO
 
 try {
     $OS = Get-CimInstance Win32_OperatingSystem
     $Reg = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
 
-    $DataSO = ([System.Management.ManagementDateTimeConverter]::ToDateTime(
-        $OS.InstallDate)).ToString('dd/MM/yyyy')
+    $NomeSO = $OS.Caption
+    $DisplayVersion = if ($Reg.PSObject.Properties.Name -contains "DisplayVersion") { $Reg.DisplayVersion } else { "" }
+    $Version = $OS.Version
+    $Arquitetura = $OS.OSArchitecture
+    $EditionId = if ($Reg.PSObject.Properties.Name -contains "EditionID") { $Reg.EditionID } else { "" }
+    $InstallationType = if ($Reg.PSObject.Properties.Name -contains "InstallationType") { $Reg.InstallationType } else { "" }
+    $ProductId = if ($Reg.PSObject.Properties.Name -contains "ProductId") { $Reg.ProductId } else { "" }
 
-    "$NomeMaquina;$($OS.Caption);$($Reg.DisplayVersion);$($OS.Manufacturer);$DataSO;$($Reg.ProductId)" |
+    $DataSO = ""
+    try {
+        $DataSO = ([System.Management.ManagementDateTimeConverter]::ToDateTime(
+            $OS.InstallDate)).ToString('dd/MM/yyyy')
+    } catch {}
+
+    $BuildBase = ""
+    if ($Reg.PSObject.Properties.Name -contains "CurrentBuild") {
+        $BuildBase = "$($Reg.CurrentBuild)"
+    } elseif ($Reg.PSObject.Properties.Name -contains "CurrentBuildNumber") {
+        $BuildBase = "$($Reg.CurrentBuildNumber)"
+    } elseif ($OS.BuildNumber) {
+        $BuildBase = "$($OS.BuildNumber)"
+    }
+
+    $BuildCompleto = $BuildBase
+    if ($Reg.PSObject.Properties.Name -contains "UBR" -and $BuildBase) {
+        $BuildCompleto = "$BuildBase.$($Reg.UBR)"
+    }
+
+    # Windows Family (Win10 vs Win11) por build
+    $BuildNum = $null
+
+    try {
+        if ($OS.BuildNumber) { $BuildNum = [int]$OS.BuildNumber }
+    } catch {}
+
+    if (-not $BuildNum) {
+        try {
+            if ($Reg.PSObject.Properties.Name -contains "CurrentBuild") {
+                $BuildNum = [int]$Reg.CurrentBuild
+            } elseif ($Reg.PSObject.Properties.Name -contains "CurrentBuildNumber") {
+                $BuildNum = [int]$Reg.CurrentBuildNumber
+            }
+        } catch {}
+    }
+
+    $WindowsFamily = "UNKNOWN"
+    if ($BuildNum) {
+        if ($BuildNum -ge 22000) { $WindowsFamily = "WINDOWS_11" }
+        else { $WindowsFamily = "WINDOWS_10" }
+    }
+
+    "$NomeMaquina;$WindowsFamily;$NomeSO;$DisplayVersion;$Version;$BuildCompleto;$Arquitetura;$EditionId;$InstallationType;$DataSO;$ProductId" |
         Out-File -Append -Encoding UTF8 $ArquivoSO
 } catch {
-    "$NomeMaquina;ERRO;;;;" | Out-File -Append -Encoding UTF8 $ArquivoSO
+    (@($NomeMaquina, "UNKNOWN", "", "", "", "", "", "", "", "", "") -join ";") |
+        Out-File -Append -Encoding UTF8 $ArquivoSO
     Write-Log "Falha ao coletar informacoes do sistema operacional." "WARN"
 }
 Write-Log "Arquivo de sistema operacional gerado: $ArquivoSO" "OK"
