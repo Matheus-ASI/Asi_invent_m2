@@ -149,24 +149,94 @@ Write-Log "Arquivo de sistema operacional gerado: $ArquivoSO" "OK"
 
 
 # ==================================================================================================
-# USUARIOS LOCAIS
+# USUARIOS (USUARIO ATIVO + PERFIS EM C:\Users)
+# DESCRICAO:
+#   - Usuario ativo: Win32_ComputerSystem.UserName (fallback: quser)
+#   - Perfis: pastas em C:\Users
+#   - Datas: LastWriteTime da pasta do perfil e do arquivo NTUSER.DAT
 # ==================================================================================================
-Write-Log "Coletando usuarios locais..." "INFO"
+Write-Log "Coletando usuario ativo e perfis em C:\Users..." "INFO"
 
-"NOME_DA_MAQUINA;USUARIO;STATUS;ULTIMO_LOGIN" |
+"NOME_DA_MAQUINA;USUARIO;ATIVO;SESSAO;PERFIL;DATA_ALTERACAO_PERFIL;DATA_ALTERACAO_NTUSER" |
     Out-File -Encoding UTF8 $ArquivoUsuarios
 
+# Usuario ativo (principal)
+$UsuarioAtivo = $null
 try {
-    Get-LocalUser | ForEach-Object {
-        $Status = if ($_.Enabled) { "Ativo" } else { "Desativado" }
-        $Login  = if ($_.LastLogon) { $_.LastLogon } else { "Nunca" }
-        "$NomeMaquina;$($_.Name);$Status;$Login" |
-            Out-File -Append -Encoding UTF8 $ArquivoUsuarios
+    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+    $UsuarioAtivo = $cs.UserName
+} catch {}
+
+# Fallback: tentar quser (sessao interativa)
+$Sessoes = @()
+try {
+    $raw = (quser 2>$null) | Select-Object -Skip 1
+    foreach ($line in $raw) {
+        $t = ($line -replace '\s{2,}', '|').Trim()
+        if ($t) {
+            $parts = $t.Split('|')
+            if ($parts.Count -ge 2) {
+                $u = ($parts[0]).Trim()
+                if ($u -and $u -ne '>') {
+                    $Sessoes += $u
+                }
+            }
+        }
     }
-} catch {
-    "$NomeMaquina;ERRO;;" | Out-File -Append -Encoding UTF8 $ArquivoUsuarios
-    Write-Log "Falha ao coletar usuarios locais." "WARN"
+} catch {}
+
+function Get-ShortUser {
+    param([string]$UserName)
+    if (-not $UserName) { return $null }
+    if ($UserName -match '\\') { return ($UserName.Split('\')[-1]).Trim() }
+    return $UserName.Trim()
 }
+
+$UsuarioAtivoShort = Get-ShortUser $UsuarioAtivo
+
+# Pastas de perfil em C:\Users
+$Perfis = @()
+try {
+    $Perfis = Get-ChildItem "C:\Users" -Directory -ErrorAction Stop |
+        Where-Object {
+            $_.Name -notin @("Public","Default","Default User","All Users","Administrador","Administrator")
+        }
+} catch {
+    Write-Log "Falha ao enumerar C:\Users." "WARN"
+}
+
+foreach ($p in $Perfis) {
+
+    $UserFolder = $p.Name
+    $PerfilPath = $p.FullName
+
+    $DataPerfil = ""
+    try { $DataPerfil = (Get-Item $PerfilPath -ErrorAction Stop).LastWriteTime.ToString("dd/MM/yyyy HH:mm:ss") } catch {}
+
+    $NtUserPath = Join-Path $PerfilPath "NTUSER.DAT"
+    $DataNtUser = ""
+    if (Test-Path $NtUserPath) {
+        try { $DataNtUser = (Get-Item $NtUserPath -ErrorAction Stop).LastWriteTime.ToString("dd/MM/yyyy HH:mm:ss") } catch {}
+    }
+
+    $Ativo = "Nao"
+    if ($UsuarioAtivoShort -and ($UserFolder -ieq $UsuarioAtivoShort)) { $Ativo = "Sim" }
+
+    $Sessao = "Desconhecida"
+    if ($Sessoes.Count -gt 0) {
+        $Sessao = if ($Sessoes -contains $UserFolder) { "Interativa" } else { "Nao listada" }
+    }
+
+    "$NomeMaquina;$UserFolder;$Ativo;$Sessao;$PerfilPath;$DataPerfil;$DataNtUser" |
+        Out-File -Append -Encoding UTF8 $ArquivoUsuarios
+}
+
+# Se nao achou perfis, ainda registra o usuario ativo (se existir)
+if (($Perfis.Count -eq 0) -and $UsuarioAtivoShort) {
+    "$NomeMaquina;$UsuarioAtivoShort;Sim;Interativa;;;" |
+        Out-File -Append -Encoding UTF8 $ArquivoUsuarios
+}
+
 Write-Log "Arquivo de usuarios gerado: $ArquivoUsuarios" "OK"
 
 
