@@ -14,6 +14,24 @@
 #
 # ==================================================================================================
 
+function Write-Log {
+    param(
+        [string]$Message,
+        [ValidateSet("INFO","OK","WARN","ERROR")]
+        [string]$Level = "INFO"
+    )
+
+    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    switch ($Level) {
+        "INFO"  { $Color = "Cyan" }
+        "OK"    { $Color = "Green" }
+        "WARN"  { $Color = "Yellow" }
+        "ERROR" { $Color = "Red" }
+    }
+
+    Write-Host "[$Timestamp] [$Level] $Message" -ForegroundColor $Color
+}
+
 # ==================================================================================================
 # FUNCAO: FtpConnection
 # DESCRICAO:
@@ -46,23 +64,27 @@ function FtpConnection {
     $Run = $FTPRequest.GetRequestStream()
     $Run.Write($FileContent, 0, $FileContent.Length)
     $Run.Close()
-    $Run.Dispose
+    $Run.Dispose()
 }
 
 
 # ==================================================================================================
 # VARIAVEIS GERAIS
 # ==================================================================================================
+Write-Log "Iniciando coleta de inventario da maquina local." "INFO"
+
 $BasePath     = "C:\TI"
 $NomeMaquina  = $env:COMPUTERNAME
 $MachinePath = Join-Path $BasePath $NomeMaquina
 
 New-Item -ItemType Directory -Path $MachinePath -Force | Out-Null
+Write-Log "Pasta de trabalho criada: $MachinePath" "OK"
 
 
 # ==================================================================================================
 # ARQUIVOS DE SAIDA
 # ==================================================================================================
+$ArquivoConsolidado = Join-Path $MachinePath "$NomeMaquina.csv"
 $ArquivoSoftwares   = Join-Path $MachinePath "${NomeMaquina}_SW.csv"
 $ArquivoSO          = Join-Path $MachinePath "${NomeMaquina}_SO.csv"
 $ArquivoUsuarios    = Join-Path $MachinePath "${NomeMaquina}_USERS.csv"
@@ -70,9 +92,12 @@ $ArquivoHardware    = Join-Path $MachinePath "${NomeMaquina}_HW.csv"
 $ArquivoDispositivos= Join-Path $MachinePath "${NomeMaquina}_DEVICES.csv"
 
 
+
 # ==================================================================================================
 # INVENTARIO DE SOFTWARES
 # ==================================================================================================
+Write-Log "Coletando inventario de softwares..." "INFO"
+
 "NOME_DA_MAQUINA;NOME_DO_SOFTWARE;VERSAO;FABRICANTE;DATA_INSTALACAO;CHAVE" |
     Out-File -Encoding UTF8 $ArquivoSoftwares
 
@@ -96,11 +121,14 @@ foreach ($App in $Softwares) {
     "$NomeMaquina;$($App.DisplayName);$($App.DisplayVersion);$($App.Publisher);$DataInstalacao;" |
         Out-File -Append -Encoding UTF8 $ArquivoSoftwares
 }
+Write-Log "Arquivo de softwares gerado: $ArquivoSoftwares" "OK"
 
 
 # ==================================================================================================
 # INFORMACOES DO SISTEMA OPERACIONAL
 # ==================================================================================================
+Write-Log "Coletando informacoes do sistema operacional..." "INFO"
+
 "NOME_DA_MAQUINA;NOME_SO;VERSAO;FABRICANTE;DATA_INSTALACAO;PRODUCT_ID" |
     Out-File -Encoding UTF8 $ArquivoSO
 
@@ -115,12 +143,16 @@ try {
         Out-File -Append -Encoding UTF8 $ArquivoSO
 } catch {
     "$NomeMaquina;ERRO;;;;" | Out-File -Append -Encoding UTF8 $ArquivoSO
+    Write-Log "Falha ao coletar informacoes do sistema operacional." "WARN"
 }
+Write-Log "Arquivo de sistema operacional gerado: $ArquivoSO" "OK"
 
 
 # ==================================================================================================
 # USUARIOS LOCAIS
 # ==================================================================================================
+Write-Log "Coletando usuarios locais..." "INFO"
+
 "NOME_DA_MAQUINA;USUARIO;STATUS;ULTIMO_LOGIN" |
     Out-File -Encoding UTF8 $ArquivoUsuarios
 
@@ -133,12 +165,16 @@ try {
     }
 } catch {
     "$NomeMaquina;ERRO;;" | Out-File -Append -Encoding UTF8 $ArquivoUsuarios
+    Write-Log "Falha ao coletar usuarios locais." "WARN"
 }
+Write-Log "Arquivo de usuarios gerado: $ArquivoUsuarios" "OK"
 
 
 # ==================================================================================================
 # HARDWARE
 # ==================================================================================================
+Write-Log "Coletando dados de hardware..." "INFO"
+
 "NOME_DA_MAQUINA;COMPONENTE;VALOR" |
     Out-File -Encoding UTF8 $ArquivoHardware
 
@@ -147,12 +183,17 @@ try {
     "$NomeMaquina;Modelo;$($Sys.Model)" | Out-File -Append -Encoding UTF8 $ArquivoHardware
     "$NomeMaquina;Memoria_GB;$([math]::Round($Sys.TotalPhysicalMemory / 1GB,2))" |
         Out-File -Append -Encoding UTF8 $ArquivoHardware
-} catch {}
+} catch {
+    Write-Log "Falha ao coletar dados de hardware." "WARN"
+}
+Write-Log "Arquivo de hardware gerado: $ArquivoHardware" "OK"
 
 
 # ==================================================================================================
 # DISPOSITIVOS
 # ==================================================================================================
+Write-Log "Coletando lista de dispositivos..." "INFO"
+
 "NOME_DA_MAQUINA;CLASSE;DISPOSITIVO;STATUS" |
     Out-File -Encoding UTF8 $ArquivoDispositivos
 
@@ -163,30 +204,80 @@ try {
     }
 } catch {
     "$NomeMaquina;ERRO;;" | Out-File -Append -Encoding UTF8 $ArquivoDispositivos
+    Write-Log "Falha ao coletar dispositivos." "WARN"
 }
+Write-Log "Arquivo de dispositivos gerado: $ArquivoDispositivos" "OK"
+
+
+# ==================================================================================================
+# CSV CONSOLIDADO (NOME EXATO DA MAQUINA)
+# DESCRICAO:
+#   Concatena todos os CSVs gerados no arquivo <NOME_DA_MAQUINA>.csv
+# ==================================================================================================
+Write-Log "Montando CSV consolidado da maquina: $ArquivoConsolidado" "INFO"
+
+if (Test-Path $ArquivoConsolidado) {
+    Remove-Item $ArquivoConsolidado -Force -ErrorAction SilentlyContinue
+}
+
+$ArquivosOrigem = @(
+    $ArquivoSoftwares,
+    $ArquivoSO,
+    $ArquivoUsuarios,
+    $ArquivoHardware,
+    $ArquivoDispositivos
+)
+
+foreach ($Arquivo in $ArquivosOrigem) {
+    if (Test-Path $Arquivo) {
+        Get-Content $Arquivo | Add-Content -Encoding UTF8 $ArquivoConsolidado
+    } else {
+        Write-Log "Arquivo nao encontrado para concatenacao: $Arquivo" "WARN"
+    }
+}
+
+Write-Log "Arquivo consolidado gerado com sucesso: $ArquivoConsolidado" "OK"
 
 
 # ==================================================================================================
 # COMPACTACAO DA PASTA DA MAQUINA
 # ==================================================================================================
+Write-Log "Compactando pasta de inventario..." "INFO"
+
 $ZipPath  = Join-Path $BasePath "$NomeMaquina.zip"
 $ZipName  = "$NomeMaquina.zip"
 
 if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
 
 Compress-Archive -Path $MachinePath -DestinationPath $ZipPath -Force
+Write-Log "Arquivo ZIP criado: $ZipPath" "OK"
 
 
 # ==================================================================================================
 # UPLOAD FTP
 # ==================================================================================================
-FtpConnection $ZipPath $ZipName
+Write-Log "Enviando inventario via FTP para o servidor..." "INFO"
+$UploadOK = $false
+
+try {
+    FtpConnection $ZipPath $ZipName
+    $UploadOK = $true
+    Write-Log "Upload FTP concluido: $ZipName" "OK"
+} catch {
+    Write-Log "Falha no upload FTP: $($_.Exception.Message)" "ERROR"
+}
 
 
 # ==================================================================================================
 # LIMPEZA LOCAL
 # ==================================================================================================
-Remove-Item -Path $MachinePath -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -Path $ZipPath -Force -ErrorAction SilentlyContinue
-
-Write-Host "Inventario enviado com sucesso: $ZipName"
+if ($UploadOK) {
+    Write-Log "Removendo arquivos locais apos upload bem-sucedido..." "INFO"
+    Remove-Item -Path $MachinePath -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path $ZipPath -Force -ErrorAction SilentlyContinue
+    Write-Log "Limpeza local finalizada." "OK"
+    Write-Log "Inventario enviado com sucesso: $ZipName" "OK"
+} else {
+    Write-Log "Arquivos locais mantidos para analise devido falha no upload." "WARN"
+    Write-Log "Execucao finalizada com erro." "ERROR"
+}
