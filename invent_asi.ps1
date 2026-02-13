@@ -1,471 +1,562 @@
-# ==================================================================================================
-# SCRIPT: Inventario_Completo_FTP.ps1
-# Autor: Marcelo Gamito / Kawan Randoli Monegatto / Matheus Lucizano
+#requires -version 5.1
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
 
-# DESCRICAO:
-#   Script responsavel por coletar informacoes da maquina local, gerar relatorios em CSV,
-#   compactar os arquivos em uma pasta nomeada com o nome da maquina e realizar upload via FTP.
-#
-# OBS:
-#   - Utiliza o MESMO metodo de autenticacao, servidor e protocolo do script_asi
-#   - Gera uma pasta C:\TI\<NOME_DA_MAQUINA>
-#   - Compacta a pasta em C:\TI\<NOME_DA_MAQUINA>.zip
-#   - Realiza upload do ZIP via FTP
-#
-# ==================================================================================================
+# ======================================================================================
+# INVENT_ASI (single-file) — v2.0.1
+# - Mantém execução via RAW do GitHub (DownloadString / iex) conforme seu fluxo atual.
+# - Gera JSON estruturado (inventory.json), compacta e faz upload via FTP (hardcoded).
+# - Logs em console + arquivo.
+# ======================================================================================
 
 function Write-Log {
     param(
-        [string]$Message,
-        [ValidateSet("INFO","OK","WARN","ERROR")]
-        [string]$Level = "INFO"
+        [Parameter(Mandatory=$true)][string]$Message,
+        [ValidateSet("INFO","OK","WARN","ERROR")][string]$Level = "INFO",
+        [Parameter(Mandatory=$false)]$Context
     )
 
-    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    switch ($Level) {
-        "INFO"  { $Color = "Cyan" }
-        "OK"    { $Color = "Green" }
-        "WARN"  { $Color = "Yellow" }
-        "ERROR" { $Color = "Red" }
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $color = switch ($Level) {
+        "INFO"  { "Cyan" }
+        "OK"    { "Green" }
+        "WARN"  { "Yellow" }
+        "ERROR" { "Red" }
+        default { "White" }
     }
 
-    Write-Host "[$Timestamp] [$Level] $Message" -ForegroundColor $Color
+    $line = "[$ts] [$Level] $Message"
+    Write-Host $line -ForegroundColor $color
+
+    if ($Context -and $Context.LogFile) {
+        try {
+            $logDir = Split-Path -Parent $Context.LogFile
+            if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+            Add-Content -Path $Context.LogFile -Value $line -Encoding UTF8
+        } catch {
+            # Não quebrar por falha de log
+        }
+    }
 }
 
-# ==================================================================================================
-# FUNCAO: FtpConnection
-# DESCRICAO:
-#   Realiza upload de um arquivo local para o servidor FTP utilizando FtpWebRequest.
-# ==================================================================================================
-function FtpConnection {
-    param (
-        $localFile,
-        $fileName
+function Write-JsonFile {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)]$Object,
+        [int]$Depth = 8
     )
 
-    # Credenciais FTP (padrao script_asi)
-    $Username = "suporte"
-    $Password = "arrayservic3"
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
 
-    # Endereco FTP
-    $RemoteFile = "ftp://app01.arrayservice.com.br/$fileName"
-
-    $FTPRequest = [System.Net.FtpWebRequest]::Create("$RemoteFile")
-    $FTPRequest = [System.Net.FtpWebRequest]$FTPRequest
-    $FTPRequest.Method = [System.Net.WebRequestMethods+Ftp]::UploadFile
-    $FTPRequest.Credentials = New-Object System.Net.NetworkCredential($Username, $Password)
-    $FTPRequest.UseBinary = $true
-    $FTPRequest.UsePassive = $true
-    $FTPRequest.EnableSsl = $false
-
-    $FileContent = [System.IO.File]::ReadAllBytes($localFile)
-    $FTPRequest.ContentLength = $FileContent.Length
-
-    $Run = $FTPRequest.GetRequestStream()
-    $Run.Write($FileContent, 0, $FileContent.Length)
-    $Run.Close()
-    $Run.Dispose()
+    $json = $Object | ConvertTo-Json -Depth $Depth
+    [System.IO.File]::WriteAllText($Path, $json, [System.Text.Encoding]::UTF8)
 }
 
+function Initialize-InventoryContext {
+    param(
+        [Parameter(Mandatory=$true)][string]$BasePath,
+        [Parameter(Mandatory=$true)][string]$Version
+    )
 
-# ==================================================================================================
-# VARIAVEIS GERAIS
-# ==================================================================================================
-Write-Log "Iniciando coleta de inventario da maquina local." "INFO"
+    $machine = $env:COMPUTERNAME
+    if (-not $machine) { throw "COMPUTERNAME não encontrado." }
 
-$BasePath     = "C:\TI"
-$NomeMaquina  = $env:COMPUTERNAME
-$MachinePath = Join-Path $BasePath $NomeMaquina
-
-New-Item -ItemType Directory -Path $MachinePath -Force | Out-Null
-Write-Log "Pasta de trabalho criada: $MachinePath" "OK"
-
-
-# ==================================================================================================
-# ARQUIVOS DE SAIDA
-# ==================================================================================================
-$ArquivoConsolidado = Join-Path $MachinePath "$NomeMaquina.csv"
-$ArquivoSoftwares   = Join-Path $MachinePath "${NomeMaquina}_SW.csv"
-$ArquivoSO          = Join-Path $MachinePath "${NomeMaquina}_SO.csv"
-$ArquivoUsuarios    = Join-Path $MachinePath "${NomeMaquina}_USERS.csv"
-$ArquivoHardware    = Join-Path $MachinePath "${NomeMaquina}_HW.csv"
-$ArquivoDispositivos= Join-Path $MachinePath "${NomeMaquina}_DEVICES.csv"
-
-
-
-# ==================================================================================================
-# INVENTARIO DE SOFTWARES
-# ==================================================================================================
-Write-Log "Coletando inventario de softwares..." "INFO"
-
-"NOME_DA_MAQUINA;NOME_DO_SOFTWARE;VERSAO;FABRICANTE;DATA_INSTALACAO;CHAVE" |
-    Out-File -Encoding UTF8 $ArquivoSoftwares
-
-$Softwares = Get-ItemProperty `
-    HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*, `
-    HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* `
-    -ErrorAction SilentlyContinue |
-    Where-Object { $_.DisplayName } |
-    Sort-Object DisplayName
-
-foreach ($App in $Softwares) {
-
-    $DataInstalacao = ""
-    if ($App.InstallDate -match '^\d{8}$') {
-        try {
-            $DataInstalacao = ([datetime]::ParseExact(
-                $App.InstallDate,'yyyyMMdd',$null)).ToString('dd/MM/yyyy')
-        } catch {}
+    if (-not ($BasePath -match '^[A-Za-z]:\\')) {
+        throw "BasePath inválido: $BasePath"
     }
 
-    "$NomeMaquina;$($App.DisplayName);$($App.DisplayVersion);$($App.Publisher);$DataInstalacao;" |
-        Out-File -Append -Encoding UTF8 $ArquivoSoftwares
+    $machinePath = Join-Path $BasePath $machine
+    $zipName = "$machine.zip"
+    $zipPath = Join-Path $BasePath $zipName
+    $logFile = Join-Path $machinePath "logs\inventario.log"
+
+    New-Item -ItemType Directory -Path $machinePath -Force | Out-Null
+
+    return [pscustomobject]@{
+        Version     = $Version
+        BasePath    = $BasePath
+        MachineName = $machine
+        MachinePath = $machinePath
+        ZipName     = $zipName
+        ZipPath     = $zipPath
+        LogFile     = $logFile
+        StartedAt   = (Get-Date)
+    }
 }
-Write-Log "Arquivo de softwares gerado: $ArquivoSoftwares" "OK"
 
+function Get-MetaInfo {
+    param([Parameter(Mandatory=$true)]$Context)
 
-# ==================================================================================================
-# INFORMACOES DO SISTEMA OPERACIONAL
-# ==================================================================================================
-Write-Log "Coletando informacoes do sistema operacional..." "INFO"
+    $now = Get-Date
+    $user = $env:USERNAME
+    $domain = $env:USERDOMAIN
 
-"NOME_DA_MAQUINA;WINDOWS_FAMILY;NOME_SO;DISPLAY_VERSION;VERSION;BUILD_COMPLETO;ARQUITETURA;EDITION_ID;INSTALLATION_TYPE;DATA_INSTALACAO;PRODUCT_ID" |
-    Out-File -Encoding UTF8 $ArquivoSO
-
-try {
-    $OS = Get-CimInstance Win32_OperatingSystem
-    $Reg = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
-
-    $NomeSO = $OS.Caption
-    $DisplayVersion = if ($Reg.PSObject.Properties.Name -contains "DisplayVersion") { $Reg.DisplayVersion } else { "" }
-    $Version = $OS.Version
-    $Arquitetura = $OS.OSArchitecture
-    $EditionId = if ($Reg.PSObject.Properties.Name -contains "EditionID") { $Reg.EditionID } else { "" }
-    $InstallationType = if ($Reg.PSObject.Properties.Name -contains "InstallationType") { $Reg.InstallationType } else { "" }
-    $ProductId = if ($Reg.PSObject.Properties.Name -contains "ProductId") { $Reg.ProductId } else { "" }
-
-    $DataSO = ""
-    try {
-        $DataSO = ([System.Management.ManagementDateTimeConverter]::ToDateTime(
-            $OS.InstallDate)).ToString('dd/MM/yyyy')
-    } catch {}
-
-    $BuildBase = ""
-    if ($Reg.PSObject.Properties.Name -contains "CurrentBuild") {
-        $BuildBase = "$($Reg.CurrentBuild)"
-    } elseif ($Reg.PSObject.Properties.Name -contains "CurrentBuildNumber") {
-        $BuildBase = "$($Reg.CurrentBuildNumber)"
-    } elseif ($OS.BuildNumber) {
-        $BuildBase = "$($OS.BuildNumber)"
+    return [ordered]@{
+        script_version = $Context.Version
+        generated_at   = $now.ToString("o")
+        started_at     = $Context.StartedAt.ToString("o")
+        hostname       = $Context.MachineName
+        run_as         = if ($domain) { "$domain\$user" } else { $user }
+        base_path      = $Context.BasePath
     }
+}
 
-    $BuildCompleto = $BuildBase
-    if ($Reg.PSObject.Properties.Name -contains "UBR" -and $BuildBase) {
-        $BuildCompleto = "$BuildBase.$($Reg.UBR)"
-    }
-
-    # Windows Family (Win10 vs Win11) por build
-    $BuildNum = $null
+function Get-OSInfo {
+    param([Parameter(Mandatory=$true)]$Context)
 
     try {
-        if ($OS.BuildNumber) { $BuildNum = [int]$OS.BuildNumber }
-    } catch {}
+        $os = Get-CimInstance Win32_OperatingSystem
+        $reg = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
 
-    if (-not $BuildNum) {
+        $buildBase = $null
+        if ($reg.PSObject.Properties.Name -contains "CurrentBuild") { $buildBase = [string]$reg.CurrentBuild }
+        elseif ($reg.PSObject.Properties.Name -contains "CurrentBuildNumber") { $buildBase = [string]$reg.CurrentBuildNumber }
+        elseif ($os.BuildNumber) { $buildBase = [string]$os.BuildNumber }
+
+        $buildFull = $buildBase
+        if (($reg.PSObject.Properties.Name -contains "UBR") -and $buildBase) {
+            $buildFull = "$buildBase.$($reg.UBR)"
+        }
+
+        $buildNum = $null
+        try { if ($os.BuildNumber) { $buildNum = [int]$os.BuildNumber } } catch {}
+        if (-not $buildNum) { try { if ($buildBase) { $buildNum = [int]$buildBase } } catch {} }
+
+        $family = "UNKNOWN"
+        if ($buildNum) { if ($buildNum -ge 22000) { $family = "WINDOWS_11" } else { $family = "WINDOWS_10" } }
+
+        $installDate = $null
+        try { $installDate = ([System.Management.ManagementDateTimeConverter]::ToDateTime($os.InstallDate)).ToString("o") } catch {}
+
+        return [ordered]@{
+            windows_family     = $family
+            caption            = $os.Caption
+            display_version    = if ($reg.PSObject.Properties.Name -contains "DisplayVersion") { $reg.DisplayVersion } else { $null }
+            version            = $os.Version
+            build              = $buildFull
+            architecture       = $os.OSArchitecture
+            edition_id         = if ($reg.PSObject.Properties.Name -contains "EditionID") { $reg.EditionID } else { $null }
+            installation_type  = if ($reg.PSObject.Properties.Name -contains "InstallationType") { $reg.InstallationType } else { $null }
+            product_id         = if ($reg.PSObject.Properties.Name -contains "ProductId") { $reg.ProductId } else { $null }
+            install_date       = $installDate
+        }
+    }
+    catch {
+        Write-Log ("Falha ao coletar OS: " + $_.Exception.Message) "WARN" $Context
+        return [ordered]@{ error = $_.Exception.Message }
+    }
+}
+
+function Get-SoftwareInventory {
+    param([Parameter(Mandatory=$true)]$Context)
+
+    $items = New-Object System.Collections.Generic.List[object]
+    $paths = @(
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+
+    foreach ($p in $paths) {
         try {
-            if ($Reg.PSObject.Properties.Name -contains "CurrentBuild") {
-                $BuildNum = [int]$Reg.CurrentBuild
-            } elseif ($Reg.PSObject.Properties.Name -contains "CurrentBuildNumber") {
-                $BuildNum = [int]$Reg.CurrentBuildNumber
+            $apps = Get-ItemProperty $p -ErrorAction SilentlyContinue |
+                Where-Object { $_.DisplayName } |
+                Select-Object DisplayName, DisplayVersion, Publisher, InstallDate, PSChildName, UninstallString
+
+            foreach ($a in $apps) {
+                $dt = $null
+                if ($a.InstallDate -and ($a.InstallDate -match '^\d{8}$')) {
+                    try { $dt = ([datetime]::ParseExact($a.InstallDate,'yyyyMMdd',$null)).ToString("o") } catch {}
+                }
+
+                $items.Add([pscustomobject]@{
+                    name         = $a.DisplayName
+                    version      = $a.DisplayVersion
+                    publisher    = $a.Publisher
+                    install_date = $dt
+                    registry_key = $a.PSChildName
+                    uninstall    = $a.UninstallString
+                    source_hive  = (if ($p.StartsWith("HKCU")) { "HKCU" } else { "HKLM" })
+                }) | Out-Null
             }
-        } catch {}
+        } catch {
+            Write-Log ("Falha ao coletar softwares em 0: 1" -f $p, $_.Exception.Message) "WARN" $Context
+        }
     }
 
-    $WindowsFamily = "UNKNOWN"
-    if ($BuildNum) {
-        if ($BuildNum -ge 22000) { $WindowsFamily = "WINDOWS_11" }
-        else { $WindowsFamily = "WINDOWS_10" }
-    }
-
-    "$NomeMaquina;$WindowsFamily;$NomeSO;$DisplayVersion;$Version;$BuildCompleto;$Arquitetura;$EditionId;$InstallationType;$DataSO;$ProductId" |
-        Out-File -Append -Encoding UTF8 $ArquivoSO
-} catch {
-    (@($NomeMaquina, "UNKNOWN", "", "", "", "", "", "", "", "", "") -join ";") |
-        Out-File -Append -Encoding UTF8 $ArquivoSO
-    Write-Log "Falha ao coletar informacoes do sistema operacional." "WARN"
+    return ($items |
+        Group-Object -Property name, version, publisher |
+        ForEach-Object { $_.Group | Select-Object -First 1 } |
+        Sort-Object name)
 }
-Write-Log "Arquivo de sistema operacional gerado: $ArquivoSO" "OK"
 
+function Get-UsersInfo {
+    param([Parameter(Mandatory=$true)]$Context)
 
-# ==================================================================================================
-# USUARIOS (USUARIO ATIVO + PERFIS EM C:\Users)
-# DESCRICAO:
-#   - Usuario ativo: Win32_ComputerSystem.UserName (fallback: quser)
-#   - Perfis: pastas em C:\Users
-#   - Datas: LastWriteTime da pasta do perfil e do arquivo NTUSER.DAT
-# ==================================================================================================
-Write-Log "Coletando usuario ativo e perfis em C:\Users..." "INFO"
+    $active = New-Object System.Collections.Generic.List[object]
+    $sessions = New-Object System.Collections.Generic.List[object]
+    $profiles = New-Object System.Collections.Generic.List[object]
 
-"NOME_DA_MAQUINA;USUARIO;ATIVO;SESSAO;PERFIL;DATA_ALTERACAO_PERFIL;DATA_ALTERACAO_NTUSER" |
-    Out-File -Encoding UTF8 $ArquivoUsuarios
+    # Sessões via CIM (preferência)
+    try {
+        $logons = Get-CimInstance Win32_LogonSession
+        $links  = Get-CimInstance Win32_LoggedOnUser
 
-# Usuario ativo (principal)
-$UsuarioAtivo = $null
-try {
-    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
-    $UsuarioAtivo = $cs.UserName
-} catch {}
+        $interesting = $logons | Where-Object { $_.LogonType -in 2,10 }  # 2=Interactive, 10=RemoteInteractive
 
-# Fallback: tentar quser (sessao interativa)
-$Sessoes = @()
-try {
-    $raw = (quser 2>$null) | Select-Object -Skip 1
-    foreach ($line in $raw) {
-        $t = ($line -replace '\s{2,}', '|').Trim()
-        if ($t) {
-            $parts = $t.Split('|')
-            if ($parts.Count -ge 2) {
-                $u = ($parts[0]).Trim()
-                if ($u -and $u -ne '>') {
-                    $Sessoes += $u
+        foreach ($ls in $interesting) {
+            $assoc = $links | Where-Object { $_.Dependent -match "LogonId=`"$($ls.LogonId)`"" }
+            foreach ($a in $assoc) {
+                $m = [regex]::Match($a.Antecedent, 'Domain=`"(?<d>[^`"]+)`".*Name=`"(?<n>[^`"]+)`"')
+                if ($m.Success) {
+                    $d = $m.Groups['d'].Value
+                    $n = $m.Groups['n'].Value
+                    $sessions.Add([pscustomobject]@{
+                        user       = "$d\$n"
+                        logon_id   = $ls.LogonId
+                        logon_type = $ls.LogonType
+                        start_time = try { ([System.Management.ManagementDateTimeConverter]::ToDateTime($ls.StartTime)).ToString("o") } catch { $null }
+                    }) | Out-Null
                 }
             }
         }
+    } catch {
+        Write-Log ("Falha ao coletar sessões CIM: " + $_.Exception.Message) "WARN" $Context
     }
-} catch {}
 
-function Get-ShortUser {
-    param([string]$UserName)
-    if (-not $UserName) { return $null }
-    if ($UserName -match '\\') { return ($UserName.Split('\')[-1]).Trim() }
-    return $UserName.Trim()
-}
-
-$UsuarioAtivoShort = Get-ShortUser $UsuarioAtivo
-
-# Pastas de perfil em C:\Users
-$Perfis = @()
-try {
-    $Perfis = Get-ChildItem "C:\Users" -Directory -ErrorAction Stop |
-        Where-Object {
-            $_.Name -notin @("Public","Default","Default User","All Users","Administrador","Administrator")
+    # Usuário principal (fallback)
+    try {
+        $cs = Get-CimInstance Win32_ComputerSystem
+        if ($cs.UserName) {
+            $active.Add([pscustomobject]@{ user = $cs.UserName; source = "Win32_ComputerSystem" }) | Out-Null
         }
-} catch {
-    Write-Log "Falha ao enumerar C:\Users." "WARN"
-}
+    } catch {}
 
-foreach ($p in $Perfis) {
-
-    $UserFolder = $p.Name
-    $PerfilPath = $p.FullName
-
-    $DataPerfil = ""
-    try { $DataPerfil = (Get-Item $PerfilPath -ErrorAction Stop).LastWriteTime.ToString("dd/MM/yyyy HH:mm:ss") } catch {}
-
-    $NtUserPath = Join-Path $PerfilPath "NTUSER.DAT"
-    $DataNtUser = ""
-    if (Test-Path $NtUserPath) {
-        try { $DataNtUser = (Get-Item $NtUserPath -ErrorAction Stop).LastWriteTime.ToString("dd/MM/yyyy HH:mm:ss") } catch {}
+    # Fallback quser se sessões vazias
+    if ($sessions.Count -eq 0) {
+        try {
+            $raw = (quser 2>$null) | Select-Object -Skip 1
+            foreach ($line in $raw) {
+                $t = ($line -replace '\s{2,}', '|').Trim()
+                if ($t) {
+                    $parts = $t.Split('|')
+                    if ($parts.Count -ge 1) {
+                        $u = ($parts[0]).Trim()
+                        if ($u -and $u -ne '>') {
+                            $sessions.Add([pscustomobject]@{ user = $u; logon_type = "quser"; start_time=$null; logon_id=$null }) | Out-Null
+                        }
+                    }
+                }
+            }
+        } catch {
+            Write-Log ("Falha ao rodar quser: " + $_.Exception.Message) "WARN" $Context
+        }
     }
 
-    $Ativo = "Nao"
-    if ($UsuarioAtivoShort -and ($UserFolder -ieq $UsuarioAtivoShort)) { $Ativo = "Sim" }
+    # Perfis via Win32_UserProfile
+    try {
+        $ups = Get-CimInstance Win32_UserProfile -ErrorAction Stop | Where-Object {
+            $_.LocalPath -and ($_.LocalPath -like "C:\Users\*") -and (-not $_.Special)
+        }
 
-    $Sessao = "Desconhecida"
-    if ($Sessoes.Count -gt 0) {
-        $Sessao = if ($Sessoes -contains $UserFolder) { "Interativa" } else { "Nao listada" }
+        foreach ($p in $ups) {
+            $lastUse = $null
+            try {
+                if ($p.LastUseTime) {
+                    $lastUse = ([System.Management.ManagementDateTimeConverter]::ToDateTime($p.LastUseTime)).ToString("o")
+                }
+            } catch {}
+
+            $ntUser = Join-Path $p.LocalPath "NTUSER.DAT"
+            $ntUserLast = $null
+            if (Test-Path -LiteralPath $ntUser) {
+                try { $ntUserLast = (Get-Item -LiteralPath $ntUser).LastWriteTime.ToString("o") } catch {}
+            }
+
+            $profiles.Add([pscustomobject]@{
+                local_path        = $p.LocalPath
+                sid               = $p.SID
+                last_use_time     = $lastUse
+                loaded            = [bool]$p.Loaded
+                ntuser_last_write = $ntUserLast
+            }) | Out-Null
+        }
+    } catch {
+        Write-Log ("Falha ao coletar perfis via Win32_UserProfile: " + $_.Exception.Message) "WARN" $Context
+        # fallback: enumerar C:\Users
+        try {
+            Get-ChildItem "C:\Users" -Directory -ErrorAction Stop |
+                Where-Object { $_.Name -notin @("Public","Default","Default User","All Users","Administrador","Administrator") } |
+                ForEach-Object {
+                    $ntUser = Join-Path $_.FullName "NTUSER.DAT"
+                    $profiles.Add([pscustomobject]@{
+                        local_path        = $_.FullName
+                        sid               = $null
+                        last_use_time     = $null
+                        loaded            = $null
+                        ntuser_last_write = if (Test-Path -LiteralPath $ntUser) { (Get-Item -LiteralPath $ntUser).LastWriteTime.ToString("o") } else { $null }
+                    }) | Out-Null
+                }
+        } catch {
+            Write-Log ("Falha ao enumerar C:\Users: " + $_.Exception.Message) "WARN" $Context
+        }
     }
 
-    "$NomeMaquina;$UserFolder;$Ativo;$Sessao;$PerfilPath;$DataPerfil;$DataNtUser" |
-        Out-File -Append -Encoding UTF8 $ArquivoUsuarios
+    # Marcar ativos com base em sessões (preferência)
+    if ($sessions.Count -gt 0) {
+        $uniq = $sessions | Group-Object user | ForEach-Object { $_.Group | Select-Object -First 1 }
+        foreach ($s in $uniq) {
+            $active.Add([pscustomobject]@{ user = $s.user; source = "sessions" }) | Out-Null
+        }
+    }
+
+    $activeDedup = $active | Group-Object user | ForEach-Object { $_.Group | Select-Object -First 1 }
+
+    return [ordered]@{
+        active_users = $activeDedup
+        sessions     = $sessions
+        profiles     = $profiles | Sort-Object local_path
+    }
 }
 
-# Se nao achou perfis, ainda registra o usuario ativo (se existir)
-if (($Perfis.Count -eq 0) -and $UsuarioAtivoShort) {
-    "$NomeMaquina;$UsuarioAtivoShort;Sim;Interativa;;;" |
-        Out-File -Append -Encoding UTF8 $ArquivoUsuarios
+function Get-HardwareInfo {
+    param([Parameter(Mandatory=$true)]$Context)
+
+    try {
+        $sys  = Get-CimInstance Win32_ComputerSystem
+        $bios = Get-CimInstance Win32_BIOS
+        $cpu  = Get-CimInstance Win32_Processor | Select-Object Name, Manufacturer, NumberOfCores, NumberOfLogicalProcessors
+        $video = Get-CimInstance Win32_VideoController | Select-Object Name, VideoProcessor, AdapterRAM
+        $mem  = Get-CimInstance Win32_PhysicalMemory | Select-Object DeviceLocator, Capacity, ConfiguredClockSpeed, SMBIOSMemoryType, FormFactor
+        $net  = Get-NetAdapter -ErrorAction SilentlyContinue | Select-Object Name, InterfaceDescription, MacAddress, Status, LinkSpeed
+        $disk = Get-CimInstance Win32_DiskDrive | Select-Object Model, InterfaceType, MediaType, Size, SerialNumber
+        $enclosure = Get-CimInstance Win32_SystemEnclosure -ErrorAction SilentlyContinue
+
+        $chassiCode = $null
+        try { if ($enclosure -and $enclosure.ChassisTypes) { $chassiCode = @($enclosure.ChassisTypes)[0] } } catch {}
+
+        $computerType = switch ($chassiCode) {
+            3  { "Desktop" }
+            6  { "Mini Tower" }
+            7  { "Tower" }
+            9  { "Laptop" }
+            10 { "Notebook" }
+            13 { "All in One" }
+            default { "Outros" }
+        }
+
+        $memTotalGB = [math]::Round((($mem | Measure-Object -Property Capacity -Sum).Sum / 1GB), 2)
+
+        $memoryTypeCode = ($mem | Select-Object -ExpandProperty SMBIOSMemoryType -First 1)
+        $memoryType = switch ($memoryTypeCode) {
+            24 { "DDR3" }
+            26 { "DDR4" }
+            34 { "DDR5" }
+            default { "Desconhecido" }
+        }
+
+        $memoryFormFactor = ($mem | Select-Object -ExpandProperty FormFactor -First 1)
+        $memoryFormat = switch ($memoryFormFactor) {
+            8  { "DIMM" }
+            12 { "SODIMM" }
+            default { "Desconhecido" }
+        }
+
+        return [ordered]@{
+            manufacturer       = $sys.Manufacturer
+            model              = $sys.Model
+            system_type        = $computerType
+            serial_bios        = $bios.SerialNumber
+            total_memory_gb    = [math]::Round($sys.TotalPhysicalMemory / 1GB, 2)
+            memory_total_gb    = $memTotalGB
+            memory_type        = $memoryType
+            memory_form_factor = $memoryFormat
+            cpu                = $cpu
+            video              = ($video | ForEach-Object {
+                                    [pscustomobject]@{
+                                        name      = $_.Name
+                                        processor = $_.VideoProcessor
+                                        vram_gb   = if ($_.AdapterRAM) { [math]::Round($_.AdapterRAM / 1GB) } else { $null }
+                                    }
+                                  })
+            memory_modules     = ($mem | ForEach-Object {
+                                    [pscustomobject]@{
+                                        locator     = $_.DeviceLocator
+                                        capacity_gb = if ($_.Capacity) { [math]::Round($_.Capacity / 1GB) } else { $null }
+                                        clock_mhz   = $_.ConfiguredClockSpeed
+                                    }
+                                  })
+            network_adapters   = ($net | ForEach-Object {
+                                    [pscustomobject]@{
+                                        name        = $_.Name
+                                        description = $_.InterfaceDescription
+                                        mac         = $_.MacAddress
+                                        status      = $_.Status
+                                        link_speed  = $_.LinkSpeed
+                                    }
+                                  })
+            disks              = ($disk | ForEach-Object {
+                                    [pscustomobject]@{
+                                        model     = $_.Model
+                                        interface = $_.InterfaceType
+                                        media_type= $_.MediaType
+                                        size_gb   = if ($_.Size) { [math]::Round($_.Size / 1GB) } else { $null }
+                                        serial    = $_.SerialNumber
+                                    }
+                                  })
+        }
+    }
+    catch {
+        Write-Log ("Falha ao coletar hardware: " + $_.Exception.Message) "WARN" $Context
+        return [ordered]@{ error = $_.Exception.Message }
+    }
 }
 
-Write-Log "Arquivo de usuarios gerado: $ArquivoUsuarios" "OK"
+function Get-DevicesInventory {
+    param([Parameter(Mandatory=$true)]$Context)
 
+    $list = New-Object System.Collections.Generic.List[object]
+    try {
+        Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name } | ForEach-Object {
+            $list.Add([pscustomobject]@{
+                pnp_class = $_.PNPClass
+                name      = $_.Name
+                status    = $_.Status
+                device_id = $_.DeviceID
+            }) | Out-Null
+        }
+    } catch {
+        Write-Log ("Falha ao coletar dispositivos: " + $_.Exception.Message) "WARN" $Context
+    }
+    return $list
+}
 
-# ==================================================================================================
-# HARDWARE
-# ==================================================================================================
-Write-Log "Coletando dados de hardware..." "INFO"
+function New-InventoryZip {
+    param([Parameter(Mandatory=$true)]$Context)
 
-"NOME_DA_MAQUINA;COMPONENTE;VALOR" |
-    Out-File -Encoding UTF8 $ArquivoHardware
+    if (Test-Path -LiteralPath $Context.ZipPath) {
+        Remove-Item -LiteralPath $Context.ZipPath -Force -ErrorAction SilentlyContinue
+    }
+    Compress-Archive -Path $Context.MachinePath -DestinationPath $Context.ZipPath -Force
+}
+
+function Cleanup-InventoryLocal {
+    param([Parameter(Mandatory=$true)]$Context)
+
+    $base = (Resolve-Path $Context.BasePath).Path.TrimEnd("\")
+    $mp   = (Resolve-Path $Context.MachinePath).Path
+
+    if (-not ($mp.StartsWith($base, [System.StringComparison]::OrdinalIgnoreCase))) {
+        throw "Caminho de limpeza inválido (fora do BasePath): $mp"
+    }
+
+    Remove-Item -LiteralPath $Context.MachinePath -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $Context.ZipPath -Force -ErrorAction SilentlyContinue
+}
+
+function Send-FtpFile {
+    param(
+        [Parameter(Mandatory=$true)][string]$LocalPath,
+        [Parameter(Mandatory=$true)][string]$RemoteFileName,
+        [Parameter(Mandatory=$false)]$Context
+    )
+
+    if (-not (Test-Path -LiteralPath $LocalPath)) {
+        throw "Arquivo local não encontrado: $LocalPath"
+    }
+
+    # Credenciais FTP (hardcoded por exigência atual)
+    $Username = "suporte"
+    $Password = "arrayservic3"
+
+    # Endpoint FTP (hardcoded por exigência atual)
+    $RemoteUri = "ftp://app01.arrayservice.com.br/$RemoteFileName"
+
+    $req = [System.Net.FtpWebRequest]::Create($RemoteUri)
+    $req = [System.Net.FtpWebRequest]$req
+    $req.Method = [System.Net.WebRequestMethods+Ftp]::UploadFile
+    $req.Credentials = New-Object System.Net.NetworkCredential($Username, $Password)
+    $req.UseBinary = $true
+    $req.UsePassive = $true
+    $req.EnableSsl = $false   # mantido (não recomendado)
+    $req.KeepAlive = $false
+
+    # Timeouts básicos
+    $req.Timeout = 120000
+    $req.ReadWriteTimeout = 120000
+
+    $fileStream = $null
+    $reqStream  = $null
+    $resp       = $null
+
+    try {
+        $fileInfo = Get-Item -LiteralPath $LocalPath
+        $req.ContentLength = $fileInfo.Length
+
+        $fileStream = [System.IO.File]::OpenRead($LocalPath)
+        $reqStream  = $req.GetRequestStream()
+
+        $buffer = New-Object byte[] (64KB)
+        while (($read = $fileStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $reqStream.Write($buffer, 0, $read)
+        }
+        $reqStream.Flush()
+
+        $resp = [System.Net.FtpWebResponse]$req.GetResponse()
+        if (-not $resp) { throw "Sem resposta do servidor FTP." }
+
+        $status = $resp.StatusDescription
+        if ($Context) { Write-Log ("Resposta FTP: " + $status.Trim()) "INFO" $Context }
+        return $true
+    }
+    finally {
+        if ($resp) { $resp.Close() }
+        if ($reqStream) { $reqStream.Close(); $reqStream.Dispose() }
+        if ($fileStream) { $fileStream.Close(); $fileStream.Dispose() }
+    }
+}
+
+# ============================ MAIN ============================
+$invVersion = "2.0.1"
+$ctx = $null
 
 try {
-    $Sys = Get-CimInstance Win32_ComputerSystem
-    $Bios = Get-CimInstance Win32_BIOS
-    $ChassiTypes = Get-WmiObject -Class Win32_SystemEnclosure | Select-Object -ExpandProperty ChassisTypes
-    $cpuInfo = (Get-CimInstance Win32_Processor).Name -join " | "
-    $netInfo = Get-NetAdapter -Physical
-    $videoInfo = Get-CimInstance Win32_VideoController
-    $memoryInfo = Get-CimInstance Win32_PhysicalMemory
-    $diskInfo = Get-Disk
-    $monitorInfo = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID |
-        Select-Object @{n="Model";e={[System.Text.Encoding]::ASCII.GetString($_.UserFriendlyName)}}
+    $ctx = Initialize-InventoryContext -BasePath "C:\TI" -Version $invVersion
+    Write-Log "Iniciando inventário (v$invVersion)..." "INFO" $ctx
 
-    $chassiType = if ($ChassiTypes -is [array]) { $ChassiTypes[0] } else { $ChassiTypes }
-    switch ($chassiType) {
-        "3"  { $computerType = "Desktop" }
-        "6"  { $computerType = "Mini Tower" }
-        "7"  { $computerType = "Tower" }
-        "9"  { $computerType = "Laptop" }
-        "10" { $computerType = "Notebook" }
-        "13" { $computerType = "All in One" }
-        Default { $computerType = "Outros" }
+    $result = [ordered]@{
+        meta     = Get-MetaInfo -Context $ctx
+        os       = Get-OSInfo -Context $ctx
+        users    = Get-UsersInfo -Context $ctx
+        hardware = Get-HardwareInfo -Context $ctx
+        software = Get-SoftwareInventory -Context $ctx
+        devices  = Get-DevicesInventory -Context $ctx
     }
 
-    $memoryTypeCode = ($memoryInfo | Select-Object -ExpandProperty SMBIOSMemoryType -First 1)
-    switch ($memoryTypeCode) {
-        "24" { $memoryType = "DDR3" }
-        "26" { $memoryType = "DDR4" }
-        "34" { $memoryType = "DDR5" }
-        Default { $memoryType = "Desconhecido" }
-    }
+    $jsonPath = Join-Path $ctx.MachinePath "inventory.json"
+    Write-JsonFile -Path $jsonPath -Object $result -Depth 8
+    Write-Log "JSON gerado: $jsonPath" "OK" $ctx
 
-    $memoryFormFactor = ($memoryInfo | Select-Object -ExpandProperty FormFactor -First 1)
-    switch ($memoryFormFactor) {
-        "8"  { $memoryFormat = "DIMM" }
-        "12" { $memoryFormat = "SODIMM" }
-        Default { $memoryFormat = "Desconhecido" }
-    }
+    New-InventoryZip -Context $ctx
+    Write-Log "ZIP criado: $($ctx.ZipPath)" "OK" $ctx
 
-    $netInterface = $netInfo.InterfaceDescription -join " | "
-    $netMac = $netInfo.MacAddress -join " | "
-    $videoModel = $videoInfo.Name -join " | "
-    $videoProcessor = $videoInfo.VideoProcessor -join " | "
-    $videoCapacity = ($videoInfo.AdapterRAM | ForEach-Object { [math]::Round($_ / 1GB) }) -join " | "
-    $memoryModule = $memoryInfo.DeviceLocator -join " | "
-    $memoryCapacity = ($memoryInfo.Capacity | ForEach-Object { [math]::Round($_ / 1GB) }) -join " | "
-    $memoryFrequency = ($memoryInfo.ConfiguredClockSpeed | Where-Object { $_ }) -join " | "
-    $memoryTotal = [math]::Round((($memoryInfo | Measure-Object -Property Capacity -Sum).Sum / 1GB), 2)
-    $diskType = ($diskInfo.BusType | Where-Object { $_ -in @("SATA","NVMe") }) -join " | "
-    $diskModel = $diskInfo.Model -join " | "
-    $diskSize = ($diskInfo.Size | ForEach-Object { [math]::Round($_ / 1GB) }) -join " | "
-    $monitorModel = ($monitorInfo | ForEach-Object { $_.Model -replace "`0","" }) -join " | "
+    Write-Log "Iniciando upload FTP..." "INFO" $ctx
+    Send-FtpFile -LocalPath $ctx.ZipPath -RemoteFileName $ctx.ZipName -Context $ctx
+    Write-Log "Upload FTP concluído: $($ctx.ZipName)" "OK" $ctx
 
-    "$NomeMaquina;Modelo;$($Sys.Model)" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;Memoria_GB;$([math]::Round($Sys.TotalPhysicalMemory / 1GB,2))" |
-        Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;Tipo;$computerType" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;Fabricante;$($Sys.Manufacturer)" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;Serial;$($Bios.SerialNumber)" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;CPU;$cpuInfo" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;NetworkAdapter;$netInterface" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;MacAddress;$netMac" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;VideoBoard;$videoModel" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;VideoProcessor;$videoProcessor" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;VideoCapacity_GB;$videoCapacity" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;MemoryType;$memoryType" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;MemoryFormat;$memoryFormat" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;MemoryFrequency_MHz;$memoryFrequency" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;MemoryModule;$memoryModule" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;MemoryCapacity_GB;$memoryCapacity" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;MemoryTotal_GB;$memoryTotal" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;DiskType;$diskType" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;DiskModel;$diskModel" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;DiskSize_GB;$diskSize" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-    "$NomeMaquina;Monitor;$monitorModel" | Out-File -Append -Encoding UTF8 $ArquivoHardware
-} catch {
-    Write-Log "Falha ao coletar dados de hardware." "WARN"
+    Write-Log "Removendo arquivos locais após upload bem-sucedido..." "INFO" $ctx
+    Cleanup-InventoryLocal -Context $ctx
+    Write-Log "Limpeza local finalizada." "OK" $ctx
+    Write-Log "Inventário finalizado com sucesso." "OK" $ctx
+    exit 0
 }
-Write-Log "Arquivo de hardware gerado: $ArquivoHardware" "OK"
-
-
-# ==================================================================================================
-# DISPOSITIVOS
-# ==================================================================================================
-Write-Log "Coletando lista de dispositivos..." "INFO"
-
-"NOME_DA_MAQUINA;CLASSE;DISPOSITIVO;STATUS" |
-    Out-File -Encoding UTF8 $ArquivoDispositivos
-
-try {
-    Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name } | ForEach-Object {
-        "$NomeMaquina;$($_.PNPClass);$($_.Name);$($_.Status)" |
-            Out-File -Append -Encoding UTF8 $ArquivoDispositivos
-    }
-} catch {
-    "$NomeMaquina;ERRO;;" | Out-File -Append -Encoding UTF8 $ArquivoDispositivos
-    Write-Log "Falha ao coletar dispositivos." "WARN"
-}
-Write-Log "Arquivo de dispositivos gerado: $ArquivoDispositivos" "OK"
-
-
-# ==================================================================================================
-# CSV CONSOLIDADO (NOME EXATO DA MAQUINA)
-# DESCRICAO:
-#   Concatena todos os CSVs gerados no arquivo <NOME_DA_MAQUINA>.csv
-# ==================================================================================================
-Write-Log "Montando CSV consolidado da maquina: $ArquivoConsolidado" "INFO"
-
-if (Test-Path $ArquivoConsolidado) {
-    Remove-Item $ArquivoConsolidado -Force -ErrorAction SilentlyContinue
-}
-
-$ArquivosOrigem = @(
-    $ArquivoSoftwares,
-    $ArquivoHardware,
-    $ArquivoSO,
-    $ArquivoUsuarios,
-    $ArquivoDispositivos
-)
-
-foreach ($Arquivo in $ArquivosOrigem) {
-    if (Test-Path $Arquivo) {
-        Get-Content $Arquivo | Add-Content -Encoding UTF8 $ArquivoConsolidado
+catch {
+    if ($ctx) {
+        Write-Log ("Falha geral: " + $_.Exception.Message) "ERROR" $ctx
+        Write-Log "Arquivos locais mantidos para análise." "WARN" $ctx
     } else {
-        Write-Log "Arquivo nao encontrado para concatenacao: $Arquivo" "WARN"
+        Write-Host ("[ERROR] Falha antes de inicializar contexto: " + $_.Exception.Message) -ForegroundColor Red
     }
-}
-
-Write-Log "Arquivo consolidado gerado com sucesso: $ArquivoConsolidado" "OK"
-
-
-# ==================================================================================================
-# COMPACTACAO DA PASTA DA MAQUINA
-# ==================================================================================================
-Write-Log "Compactando pasta de inventario..." "INFO"
-
-$ZipPath  = Join-Path $BasePath "$NomeMaquina.zip"
-$ZipName  = "$NomeMaquina.zip"
-
-if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
-
-Compress-Archive -Path $MachinePath -DestinationPath $ZipPath -Force
-Write-Log "Arquivo ZIP criado: $ZipPath" "OK"
-
-
-# ==================================================================================================
-# UPLOAD FTP
-# ==================================================================================================
-Write-Log "Enviando inventario via FTP para o servidor..." "INFO"
-$UploadOK = $false
-
-try {
-    FtpConnection $ZipPath $ZipName
-    $UploadOK = $true
-    Write-Log "Upload FTP concluido: $ZipName" "OK"
-} catch {
-    Write-Log "Falha no upload FTP: $($_.Exception.Message)" "ERROR"
-}
-
-
-# ==================================================================================================
-# LIMPEZA LOCAL
-# ==================================================================================================
-if ($UploadOK) {
-    Write-Log "Removendo arquivos locais apos upload bem-sucedido..." "INFO"
-    Remove-Item -Path $MachinePath -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path $ZipPath -Force -ErrorAction SilentlyContinue
-    Write-Log "Limpeza local finalizada." "OK"
-    Write-Log "Inventario enviado com sucesso: $ZipName" "OK"
-} else {
-    Write-Log "Arquivos locais mantidos para analise devido falha no upload." "WARN"
-    Write-Log "Execucao finalizada com erro." "ERROR"
+    exit 1
 }
