@@ -299,9 +299,78 @@ Write-Log "Coletando dados de hardware..." "INFO"
 
 try {
     $Sys = Get-CimInstance Win32_ComputerSystem
+    $Bios = Get-CimInstance Win32_BIOS
+    $ChassiTypes = Get-WmiObject -Class Win32_SystemEnclosure | Select-Object -ExpandProperty ChassisTypes
+    $cpuInfo = (Get-CimInstance Win32_Processor).Name -join " | "
+    $netInfo = Get-NetAdapter -Physical
+    $videoInfo = Get-CimInstance Win32_VideoController
+    $memoryInfo = Get-CimInstance Win32_PhysicalMemory
+    $diskInfo = Get-Disk
+    $monitorInfo = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID |
+        Select-Object @{n="Model";e={[System.Text.Encoding]::ASCII.GetString($_.UserFriendlyName)}}
+
+    $chassiType = if ($ChassiTypes -is [array]) { $ChassiTypes[0] } else { $ChassiTypes }
+    switch ($chassiType) {
+        "3"  { $computerType = "Desktop" }
+        "6"  { $computerType = "Mini Tower" }
+        "7"  { $computerType = "Tower" }
+        "9"  { $computerType = "Laptop" }
+        "10" { $computerType = "Notebook" }
+        "13" { $computerType = "All in One" }
+        Default { $computerType = "Outros" }
+    }
+
+    $memoryTypeCode = ($memoryInfo | Select-Object -ExpandProperty SMBIOSMemoryType -First 1)
+    switch ($memoryTypeCode) {
+        "24" { $memoryType = "DDR3" }
+        "26" { $memoryType = "DDR4" }
+        "34" { $memoryType = "DDR5" }
+        Default { $memoryType = "Desconhecido" }
+    }
+
+    $memoryFormFactor = ($memoryInfo | Select-Object -ExpandProperty FormFactor -First 1)
+    switch ($memoryFormFactor) {
+        "8"  { $memoryFormat = "DIMM" }
+        "12" { $memoryFormat = "SODIMM" }
+        Default { $memoryFormat = "Desconhecido" }
+    }
+
+    $netInterface = $netInfo.InterfaceDescription -join " | "
+    $netMac = $netInfo.MacAddress -join " | "
+    $videoModel = $videoInfo.Name -join " | "
+    $videoProcessor = $videoInfo.VideoProcessor -join " | "
+    $videoCapacity = ($videoInfo.AdapterRAM | ForEach-Object { [math]::Round($_ / 1GB) }) -join " | "
+    $memoryModule = $memoryInfo.DeviceLocator -join " | "
+    $memoryCapacity = ($memoryInfo.Capacity | ForEach-Object { [math]::Round($_ / 1GB) }) -join " | "
+    $memoryFrequency = ($memoryInfo.ConfiguredClockSpeed | Where-Object { $_ }) -join " | "
+    $memoryTotal = [math]::Round((($memoryInfo | Measure-Object -Property Capacity -Sum).Sum / 1GB), 2)
+    $diskType = ($diskInfo.BusType | Where-Object { $_ -in @("SATA","NVMe") }) -join " | "
+    $diskModel = $diskInfo.Model -join " | "
+    $diskSize = ($diskInfo.Size | ForEach-Object { [math]::Round($_ / 1GB) }) -join " | "
+    $monitorModel = ($monitorInfo | ForEach-Object { $_.Model -replace "`0","" }) -join " | "
+
     "$NomeMaquina;Modelo;$($Sys.Model)" | Out-File -Append -Encoding UTF8 $ArquivoHardware
     "$NomeMaquina;Memoria_GB;$([math]::Round($Sys.TotalPhysicalMemory / 1GB,2))" |
         Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;Tipo;$computerType" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;Fabricante;$($Sys.Manufacturer)" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;Serial;$($Bios.SerialNumber)" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;CPU;$cpuInfo" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;NetworkAdapter;$netInterface" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;MacAddress;$netMac" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;VideoBoard;$videoModel" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;VideoProcessor;$videoProcessor" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;VideoCapacity_GB;$videoCapacity" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;MemoryType;$memoryType" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;MemoryFormat;$memoryFormat" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;MemoryFrequency_MHz;$memoryFrequency" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;MemoryModule;$memoryModule" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;MemoryCapacity_GB;$memoryCapacity" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;MemoryTotal_GB;$memoryTotal" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;DiskType;$diskType" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;DiskModel;$diskModel" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;DiskSize_GB;$diskSize" | Out-File -Append -Encoding UTF8 $ArquivoHardware
+    "$NomeMaquina;Monitor;$monitorModel" | Out-File -Append -Encoding UTF8 $ArquivoHardware
 } catch {
     Write-Log "Falha ao coletar dados de hardware." "WARN"
 }
@@ -341,9 +410,9 @@ if (Test-Path $ArquivoConsolidado) {
 
 $ArquivosOrigem = @(
     $ArquivoSoftwares,
+    $ArquivoHardware,
     $ArquivoSO,
     $ArquivoUsuarios,
-    $ArquivoHardware,
     $ArquivoDispositivos
 )
 
