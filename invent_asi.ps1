@@ -1,4 +1,8 @@
 #requires -version 5.1
+param(
+    [switch]$TestSoftware
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -152,6 +156,12 @@ function Get-SoftwareInventory {
     param([Parameter(Mandatory=$true)]$Context)
 
     $items = New-Object System.Collections.Generic.List[object]
+    $toStr = {
+        param($v)
+        if ($null -eq $v) { return $null }
+        if ($v -is [System.Array]) { return ($v -join "; ") }
+        return [string]$v
+    }
     $paths = @(
         "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
         "HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
@@ -161,9 +171,10 @@ function Get-SoftwareInventory {
     foreach ($p in $paths) {
         try {
             $apps = Get-ItemProperty $p -ErrorAction SilentlyContinue |
-                Where-Object { $_.DisplayName } |
+                Where-Object { ($_.PSObject.Properties.Name -contains "DisplayName") -and $_.DisplayName } |
                 Select-Object DisplayName, DisplayVersion, Publisher, InstallDate, PSChildName, UninstallString
 
+            $sourceHive = if ($p.StartsWith("HKCU")) { "HKCU" } else { "HKLM" }
             foreach ($a in $apps) {
                 $dt = $null
                 if ($a.InstallDate -and ($a.InstallDate -match '^\d{8}$')) {
@@ -171,17 +182,17 @@ function Get-SoftwareInventory {
                 }
 
                 $items.Add([pscustomobject]@{
-                    name         = $a.DisplayName
-                    version      = $a.DisplayVersion
-                    publisher    = $a.Publisher
+                    name         = & $toStr $a.DisplayName
+                    version      = & $toStr $a.DisplayVersion
+                    publisher    = & $toStr $a.Publisher
                     install_date = $dt
-                    registry_key = $a.PSChildName
-                    uninstall    = $a.UninstallString
-                    source_hive  = (if ($p.StartsWith("HKCU")) { "HKCU" } else { "HKLM" })
+                    registry_key = & $toStr $a.PSChildName
+                    uninstall    = & $toStr $a.UninstallString
+                    source_hive  = $sourceHive
                 }) | Out-Null
             }
         } catch {
-            Write-Log ("Falha ao coletar softwares em 0: 1" -f $p, $_.Exception.Message) "WARN" $Context
+            Write-Log ("Falha ao coletar softwares em {0}: {1}" -f $p, $_.Exception.Message) "WARN" $Context
         }
     }
 
@@ -501,7 +512,11 @@ function Send-FtpFile {
         while (($read = $fileStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
             $reqStream.Write($buffer, 0, $read)
         }
+        # Importante: fechar o stream antes do GetResponse para finalizar o envio
         $reqStream.Flush()
+        $reqStream.Close()
+        $reqStream.Dispose()
+        $reqStream = $null
 
         $resp = [System.Net.FtpWebResponse]$req.GetResponse()
         if (-not $resp) { throw "Sem resposta do servidor FTP." }
@@ -520,6 +535,16 @@ function Send-FtpFile {
 # ============================ MAIN ============================
 $invVersion = "2.0.1"
 $ctx = $null
+
+if ($TestSoftware) {
+    $ctx = [pscustomobject]@{ LogFile = $null }
+    Write-Log "TESTE: coletando softwares..." "INFO" $ctx
+    $sw = Get-SoftwareInventory -Context $ctx
+    $count = if ($sw) { $sw.Count } else { 0 }
+    Write-Host ("TESTE: softwares encontrados: {0}" -f $count) -ForegroundColor Green
+    if ($sw) { $sw | Select-Object -First 5 | Format-Table -AutoSize }
+    exit 0
+}
 
 try {
     $ctx = Initialize-InventoryContext -BasePath "C:\TI" -Version $invVersion
