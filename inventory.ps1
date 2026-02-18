@@ -361,9 +361,9 @@ function Get-UsersInfo {
     $activeDedup = $active | Group-Object user | ForEach-Object { $_.Group | Select-Object -First 1 }
 
     return [ordered]@{
-        active_users = $activeDedup
-        sessions     = $sessions
-        profiles     = $profiles | Sort-Object local_path
+        active_users = @($activeDedup)
+        sessions     = @($sessions)
+        profiles     = @($profiles | Sort-Object local_path)
     }
 }
 
@@ -622,17 +622,12 @@ try {
 
     # USUARIOS
     Write-CsvLine -Path $arquivoUsuarios -Line "NOME_DA_MAQUINA;USUARIO;ATIVO;SESSAO;PERFIL;DATA_ALTERACAO_PERFIL;DATA_ALTERACAO_NTUSER"
-    $activeShort = @()
-    if ($result.users.active_users) {
-        $activeShort = $result.users.active_users | ForEach-Object { Get-ShortUserName $_.user }
-    }
-    $sessionShort = @()
-    if ($result.users.sessions) {
-        $sessionShort = $result.users.sessions | ForEach-Object { Get-ShortUserName $_.user }
-    }
+    $activeShort = @($result.users.active_users | ForEach-Object { Get-ShortUserName $_.user })
+    $sessionShort = @($result.users.sessions | ForEach-Object { Get-ShortUserName $_.user })
+    $profiles = @($result.users.profiles)
 
-    if ($result.users.profiles -and $result.users.profiles.Count -gt 0) {
-        foreach ($p in $result.users.profiles) {
+    if ($profiles.Count -gt 0) {
+        foreach ($p in $profiles) {
             $userFolder = if ($p.local_path) { Split-Path -Leaf $p.local_path } else { "" }
             $ativo = if ($activeShort -contains $userFolder) { "Sim" } else { "Nao" }
             $sessao = "Desconhecida"
