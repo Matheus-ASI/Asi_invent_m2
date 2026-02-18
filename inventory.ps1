@@ -93,6 +93,27 @@ function Join-Values {
     return (($Values | Where-Object { $_ -ne $null -and $_ -ne "" }) -join " | ")
 }
 
+function Invoke-InventoryStep {
+    param(
+        [Parameter(Mandatory=$true)][string]$Name,
+        [Parameter(Mandatory=$true)][scriptblock]$Script,
+        [Parameter(Mandatory=$true)]$Context,
+        $Fallback
+    )
+
+    try {
+        Write-Log ("Coletando {0}..." -f $Name) "INFO" $Context
+        return & $Script
+    } catch {
+        Write-Log ("Falha ao coletar {0}: {1}" -f $Name, $_.Exception.Message) "WARN" $Context
+        if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) {
+            $pos = ($_.InvocationInfo.PositionMessage -replace '\r?\n', ' ').Trim()
+            if ($pos) { Write-Log ("Local: " + $pos) "WARN" $Context }
+        }
+        return $Fallback
+    }
+}
+
 function Initialize-InventoryContext {
     param(
         [Parameter(Mandatory=$true)][string]$BasePath,
@@ -586,13 +607,26 @@ try {
     $ctx = Initialize-InventoryContext -BasePath "C:\TI" -Version $invVersion
     Write-Log "Iniciando inventário (v$invVersion)..." "INFO" $ctx
 
+    $meta = Invoke-InventoryStep -Name "metadados" -Script { Get-MetaInfo -Context $ctx } -Context $ctx `
+        -Fallback ([ordered]@{ error = "Falha ao coletar metadados." })
+    $os = Invoke-InventoryStep -Name "sistema operacional" -Script { Get-OSInfo -Context $ctx } -Context $ctx `
+        -Fallback ([ordered]@{ error = "Falha ao coletar sistema operacional." })
+    $users = Invoke-InventoryStep -Name "usuarios" -Script { Get-UsersInfo -Context $ctx } -Context $ctx `
+        -Fallback ([ordered]@{ active_users = @(); sessions = @(); profiles = @(); error = "Falha ao coletar usuarios." })
+    $hardware = Invoke-InventoryStep -Name "hardware" -Script { Get-HardwareInfo -Context $ctx } -Context $ctx `
+        -Fallback ([ordered]@{ cpu=@(); network_adapters=@(); video=@(); memory_modules=@(); disks=@(); error="Falha ao coletar hardware." })
+    $software = Invoke-InventoryStep -Name "softwares" -Script { Get-SoftwareInventory -Context $ctx } -Context $ctx `
+        -Fallback @()
+    $devices = Invoke-InventoryStep -Name "dispositivos" -Script { Get-DevicesInventory -Context $ctx } -Context $ctx `
+        -Fallback @()
+
     $result = [ordered]@{
-        meta     = Get-MetaInfo -Context $ctx
-        os       = Get-OSInfo -Context $ctx
-        users    = Get-UsersInfo -Context $ctx
-        hardware = Get-HardwareInfo -Context $ctx
-        software = Get-SoftwareInventory -Context $ctx
-        devices  = Get-DevicesInventory -Context $ctx
+        meta     = $meta
+        os       = $os
+        users    = $users
+        hardware = $hardware
+        software = $software
+        devices  = $devices
     }
 
     # Arquivos de saída (mesmos do invent_asi.ps1)
