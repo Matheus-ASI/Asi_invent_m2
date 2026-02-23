@@ -584,24 +584,77 @@ function Get-UsersInfo {
         }
     } catch {}
 
-    # Fallback quser se sessões vazias
+    # Fallback de terminal se sessões via CIM estiverem vazias
     if ($sessions.Count -eq 0) {
-        try {
-            $raw = (quser 2>$null) | Select-Object -Skip 1
-            foreach ($line in $raw) {
-                $t = ($line -replace '\s{2,}', '|').Trim()
-                if ($t) {
-                    $parts = $t.Split('|')
-                    if ($parts.Count -ge 1) {
-                        $u = Normalize-Text (($parts[0]).Trim().TrimStart('>'))
-                        if ($u) {
-                            $sessions.Add([pscustomobject]@{ user = $u; logon_type = "quser"; start_time=$null; logon_id=$null }) | Out-Null
-                        }
-                    }
-                }
+        $sessionCommands = @(
+            [pscustomobject]@{
+                name = "quser.exe"
+                file = (Join-Path $env:WINDIR "System32\quser.exe")
+                args = @()
+            },
+            [pscustomobject]@{
+                name = "query user"
+                file = (Join-Path $env:WINDIR "System32\query.exe")
+                args = @("user")
             }
-        } catch {
-            Write-Log ("Falha ao rodar quser: " + $_.Exception.Message) "WARN" $Context
+        )
+
+        $parseSessionLines = {
+            param([string[]]$Lines, [string]$SourceName)
+            $added = 0
+            foreach ($line in $Lines) {
+                if (-not $line) { continue }
+                if ($line -match '^\s*USERNAME\s+') { continue } # cabeçalho
+
+                $t = ($line -replace '\s{2,}', '|').Trim()
+                if (-not $t) { continue }
+
+                $parts = $t.Split('|')
+                if ($parts.Count -lt 1) { continue }
+
+                $u = Normalize-Text (($parts[0]).Trim().TrimStart('>'))
+                if (-not $u) { continue }
+
+                $sessions.Add([pscustomobject]@{
+                    user       = $u
+                    logon_type = $SourceName
+                    start_time = $null
+                    logon_id   = $null
+                }) | Out-Null
+                $added++
+            }
+            return $added
+        }
+
+        $terminalSourceUsed = $null
+        $attemptedTerminalFallback = $false
+        $hadUnexpectedTerminalError = $false
+
+        foreach ($cmd in $sessionCommands) {
+            if (-not (Test-Path -LiteralPath $cmd.file)) { continue }
+            $attemptedTerminalFallback = $true
+
+            try {
+                $rawOut = @(& $cmd.file @($cmd.args) 2>$null)
+                if (-not $rawOut -or $rawOut.Count -eq 0) { continue }
+
+                $added = & $parseSessionLines -Lines $rawOut -SourceName $cmd.name
+                if ($added -gt 0) {
+                    $terminalSourceUsed = $cmd.name
+                    break
+                }
+            } catch {
+                $hadUnexpectedTerminalError = $true
+                Write-Log ("Falha inesperada ao consultar sessões via {0}: {1}" -f $cmd.name, $_.Exception.Message) "WARN" $Context
+            }
+        }
+
+        if ($terminalSourceUsed) {
+            Write-Log ("Sessões coletadas via fallback de terminal: {0}" -f $terminalSourceUsed) "INFO" $Context
+        } elseif (-not $attemptedTerminalFallback) {
+            Write-Log "Utilitário de sessão indisponível no host; seguindo com fontes CIM/perfil." "INFO" $Context
+        } elseif (-not $hadUnexpectedTerminalError) {
+            Write-Log "Sem sessões interativas em fallback de terminal; seguindo com fontes CIM/perfil." "INFO" $Context
         }
     }
 
