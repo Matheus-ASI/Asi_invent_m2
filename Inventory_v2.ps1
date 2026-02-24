@@ -178,7 +178,7 @@ function New-CsvSchemaMap {
             "NOME_DA_MAQUINA","COMPONENTE","VALOR"
         )
         devices = @(
-            "NOME_DA_MAQUINA","CLASSE","DISPOSITIVO","STATUS"
+            "NOME_DA_MAQUINA","CLASSE","DISPOSITIVO","STATUS","DEVICE_ID"
         )
     }
 }
@@ -1160,6 +1160,7 @@ try {
             CLASSE = $d.pnp_class
             DISPOSITIVO = $d.name
             STATUS = $d.status
+            DEVICE_ID = $d.device_id
         }
     }
     Flush-CsvBuffer -Buffer $buffers.devices -Context $ctx
