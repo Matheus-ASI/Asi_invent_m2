@@ -828,22 +828,47 @@ function Get-HardwareInfo {
 function Get-DevicesInventory {
     param([Parameter(Mandatory=$true)]$Context)
 
-    $list = New-Object System.Collections.Generic.List[object]
+    $dedupe = @{}
+    $rawCount = 0
     try {
         Get-CimInstance Win32_PnPEntity -Property PNPClass, Name, Status, DeviceID |
             Where-Object { $_.Name } |
             ForEach-Object {
-            $list.Add([pscustomobject]@{
+            $rawCount++
+
+            $device = [pscustomobject]@{
                 pnp_class = Normalize-Text $_.PNPClass
                 name      = Normalize-Text $_.Name
                 status    = Normalize-Text $_.Status
                 device_id = Normalize-Text $_.DeviceID
-            }) | Out-Null
+            }
+
+            $dedupeKey = if ($device.device_id) {
+                $device.device_id.ToLowerInvariant()
+            } else {
+                ("{0}|{1}" -f $device.pnp_class, $device.name).ToLowerInvariant()
+            }
+
+            if (-not $dedupe.ContainsKey($dedupeKey)) {
+                $dedupe[$dedupeKey] = $device
+                return
+            }
+
+            $current = $dedupe[$dedupeKey]
+            if ((-not $current.status) -and $device.status) { $current.status = $device.status }
+            if ((-not $current.pnp_class) -and $device.pnp_class) { $current.pnp_class = $device.pnp_class }
+            if ((-not $current.name) -and $device.name) { $current.name = $device.name }
+            if ((-not $current.device_id) -and $device.device_id) { $current.device_id = $device.device_id }
         }
     } catch {
         Write-Log ("Falha ao coletar dispositivos: " + $_.Exception.Message) "WARN" $Context
     }
-    return @($list.ToArray() | Sort-Object pnp_class, name)
+
+    $uniqueDevices = @($dedupe.GetEnumerator() | ForEach-Object { $_.Value } | Sort-Object pnp_class, name)
+    $removedCount = [math]::Max(0, $rawCount - $uniqueDevices.Count)
+    Write-Log ("Dispositivos coletados (bruto={0}, unico={1}, duplicados_removidos={2})" -f $rawCount, $uniqueDevices.Count, $removedCount) "INFO" $Context
+
+    return $uniqueDevices
 }
 
 function New-InventoryZip {
@@ -1100,7 +1125,7 @@ try {
     $memLoc = Join-Values ($hw.memory_modules | ForEach-Object { $_.locator })
     $memCap = Join-Values ($hw.memory_modules | ForEach-Object { $_.capacity_gb })
     $memClk = Join-Values ($hw.memory_modules | ForEach-Object { $_.clock_mhz })
-    $diskType = Join-Values ($hw.disks | ForEach-Object { $_.interface })
+    $diskType = Join-Values ($hw.disks | ForEach-Object { if (("$($_.interface) $($_.model) $($_.media_type)") -match "NVMe") { "NVMe" } else { "SATA" } })
     $diskModel = Join-Values ($hw.disks | ForEach-Object { $_.model })
     $diskSize = Join-Values ($hw.disks | ForEach-Object { $_.size_gb })
 
