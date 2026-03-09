@@ -163,6 +163,156 @@ function Normalize-User {
     return $short
 }
 
+function Get-StorageMatchToken {
+    param([string]$Value)
+
+    $text = Normalize-Text $Value
+    if (-not $text) { return "" }
+    return ([regex]::Replace($text.ToUpperInvariant(), '[^A-Z0-9]', ''))
+}
+
+function Get-StorageCandidateName {
+    param($Disk)
+
+    if ($null -eq $Disk) { return "" }
+
+    foreach ($prop in @("Model", "FriendlyName", "Name")) {
+        if ($Disk.PSObject.Properties[$prop]) {
+            $value = Normalize-Text $Disk.$prop
+            if ($value) { return $value }
+        }
+    }
+
+    return ""
+}
+
+function Test-StorageSizeApproxMatch {
+    param(
+        [Nullable[Int64]]$Left,
+        [Nullable[Int64]]$Right
+    )
+
+    if (($null -eq $Left) -or ($null -eq $Right)) { return $false }
+
+    try {
+        $delta = [math]::Abs([double]$Left - [double]$Right)
+        return ($delta -le (5 * 1GB))
+    } catch {
+        return $false
+    }
+}
+
+function Find-StorageDiskMatch {
+    param(
+        [string]$SerialNumber,
+        [string]$Model,
+        [Nullable[Int64]]$SizeBytes,
+        [object[]]$Candidates
+    )
+
+    if (-not $Candidates -or $Candidates.Count -eq 0) { return $null }
+
+    $serialToken = Get-StorageMatchToken $SerialNumber
+    if ($serialToken) {
+        $matchBySerial = @(
+            $Candidates | Where-Object {
+                (Get-StorageMatchToken $_.SerialNumber) -eq $serialToken
+            }
+        )
+        if ($matchBySerial.Count -gt 0) { return $matchBySerial[0] }
+    }
+
+    $modelToken = Get-StorageMatchToken $Model
+    if (-not $modelToken) { return $null }
+
+    $matchByModel = @(
+        $Candidates | Where-Object {
+            (Get-StorageMatchToken (Get-StorageCandidateName $_)) -eq $modelToken
+        }
+    )
+    if ($matchByModel.Count -eq 0) { return $null }
+
+    if ($null -ne $SizeBytes) {
+        $matchByModelAndSize = @(
+            $matchByModel | Where-Object {
+                $candidateSize = $null
+                try {
+                    if ($_.PSObject.Properties["Size"] -and $null -ne $_.Size) {
+                        $candidateSize = [int64]$_.Size
+                    }
+                } catch {}
+                Test-StorageSizeApproxMatch -Left $SizeBytes -Right $candidateSize
+            }
+        )
+        if ($matchByModelAndSize.Count -gt 0) { return $matchByModelAndSize[0] }
+    }
+
+    return $matchByModel[0]
+}
+
+function Normalize-StorageBusType {
+    param(
+        [string[]]$Values,
+        [string]$Model
+    )
+
+    foreach ($value in @($Values) + @($Model)) {
+        $text = Normalize-Text $value
+        if (-not $text) { continue }
+
+        $upper = $text.ToUpperInvariant()
+
+        if ($upper -match 'NVME') { return "NVMe" }
+        if ($upper -match '\bSATA\b') { return "SATA" }
+        if (($upper -eq 'IDE') -or ($upper -match '\bATA\b') -or ($upper -match 'AHCI')) { return "SATA" }
+        if ($upper -match '\bSAS\b') { return "SAS" }
+        if ($upper -match 'USB') { return "USB" }
+        if ($upper -match 'RAID') { return "RAID" }
+        if (($upper -match '\bMMC\b') -or ($upper -match 'SD')) { return "MMC/SD" }
+    }
+
+    return "Desconhecido"
+}
+
+function Normalize-StorageMediaType {
+    param(
+        [string[]]$Values,
+        [string]$Model,
+        [string]$BusType
+    )
+
+    foreach ($value in @($Values) + @($Model)) {
+        $text = Normalize-Text $value
+        if (-not $text) { continue }
+
+        $upper = $text.ToUpperInvariant()
+
+        if ($upper -match 'REMOV|FLASH') { return "Removivel" }
+        if ($upper -match 'SSD|SOLID') { return "SSD" }
+        if ($upper -match 'HDD|ROTAT|HARD DISK') { return "HDD" }
+    }
+
+    if ($BusType -eq "NVMe") { return "SSD" }
+    return "Desconhecido"
+}
+
+function Get-StorageDiskTypeLabel {
+    param(
+        [string]$MediaType,
+        [string]$BusType
+    )
+
+    if ($BusType -eq "NVMe") { return "SSD NVMe" }
+
+    $hasMedia = $MediaType -and ($MediaType -ne "Desconhecido")
+    $hasBus = $BusType -and ($BusType -ne "Desconhecido")
+
+    if ($hasMedia -and $hasBus) { return ("{0} {1}" -f $MediaType, $BusType) }
+    if ($hasMedia) { return $MediaType }
+    if ($hasBus) { return $BusType }
+    return "Desconhecido"
+}
+
 function New-CsvSchemaMap {
     return [ordered]@{
         software = @(
@@ -744,6 +894,30 @@ function Get-HardwareInfo {
         $net  = Get-NetAdapter -ErrorAction SilentlyContinue | Select-Object Name, InterfaceDescription, MacAddress, Status, LinkSpeed
         $disk = Get-CimInstance Win32_DiskDrive -Property Model, InterfaceType, MediaType, Size, SerialNumber | Select-Object Model, InterfaceType, MediaType, Size, SerialNumber
         $enclosure = Get-CimInstance Win32_SystemEnclosure -Property ChassisTypes -ErrorAction SilentlyContinue
+        $physicalDisks = @()
+        $logicalDisks = @()
+
+        try {
+            if (Get-Command Get-PhysicalDisk -ErrorAction SilentlyContinue) {
+                $physicalDisks = @(
+                    Get-PhysicalDisk -ErrorAction Stop |
+                    Select-Object FriendlyName, Model, SerialNumber, Size, MediaType, BusType
+                )
+            }
+        } catch {
+            Write-Log ("Falha ao consultar Get-PhysicalDisk: " + $_.Exception.Message) "WARN" $Context
+        }
+
+        try {
+            if (Get-Command Get-Disk -ErrorAction SilentlyContinue) {
+                $logicalDisks = @(
+                    Get-Disk -ErrorAction Stop |
+                    Select-Object FriendlyName, Model, SerialNumber, Size, BusType
+                )
+            }
+        } catch {
+            Write-Log ("Falha ao consultar Get-Disk: " + $_.Exception.Message) "WARN" $Context
+        }
 
         $chassiCode = $null
         try { if ($enclosure -and $enclosure.ChassisTypes) { $chassiCode = @($enclosure.ChassisTypes)[0] } } catch {}
@@ -809,12 +983,36 @@ function Get-HardwareInfo {
                                     }
                                   })
             disks              = ($disk | ForEach-Object {
+                                    $serial = Normalize-Text $_.SerialNumber
+                                    $model = Normalize-Text $_.Model
+                                    $sizeBytes = $null
+                                    try {
+                                        if ($_.Size) { $sizeBytes = [int64]$_.Size }
+                                    } catch {}
+
+                                    $physicalMatch = Find-StorageDiskMatch -SerialNumber $serial -Model $model -SizeBytes $sizeBytes -Candidates $physicalDisks
+                                    $logicalMatch = Find-StorageDiskMatch -SerialNumber $serial -Model $model -SizeBytes $sizeBytes -Candidates $logicalDisks
+
+                                    $busTypeNormalized = Normalize-StorageBusType -Values @(
+                                        $(if ($physicalMatch) { Normalize-Text $physicalMatch.BusType } else { "" }),
+                                        $(if ($logicalMatch) { Normalize-Text $logicalMatch.BusType } else { "" }),
+                                        (Normalize-Text $_.InterfaceType)
+                                    ) -Model $model
+
+                                    $mediaTypeNormalized = Normalize-StorageMediaType -Values @(
+                                        $(if ($physicalMatch) { Normalize-Text $physicalMatch.MediaType } else { "" }),
+                                        (Normalize-Text $_.MediaType)
+                                    ) -Model $model -BusType $busTypeNormalized
+
                                     [pscustomobject]@{
-                                        model     = Normalize-Text $_.Model
-                                        interface = Normalize-Text $_.InterfaceType
-                                        media_type= Normalize-Text $_.MediaType
-                                        size_gb   = if ($_.Size) { [math]::Round($_.Size / 1GB) } else { $null }
-                                        serial    = Normalize-Text $_.SerialNumber
+                                        model                  = $model
+                                        interface              = Normalize-Text $_.InterfaceType
+                                        media_type             = Normalize-Text $_.MediaType
+                                        media_type_normalized  = $mediaTypeNormalized
+                                        bus_type_normalized    = $busTypeNormalized
+                                        disk_type              = Get-StorageDiskTypeLabel -MediaType $mediaTypeNormalized -BusType $busTypeNormalized
+                                        size_gb                = if ($_.Size) { [math]::Round($_.Size / 1GB) } else { $null }
+                                        serial                 = $serial
                                     }
                                   })
         }
@@ -1125,7 +1323,7 @@ try {
     $memLoc = Join-Values ($hw.memory_modules | ForEach-Object { $_.locator })
     $memCap = Join-Values ($hw.memory_modules | ForEach-Object { $_.capacity_gb })
     $memClk = Join-Values ($hw.memory_modules | ForEach-Object { $_.clock_mhz })
-    $diskType = Join-Values ($hw.disks | ForEach-Object { if (("$($_.interface) $($_.model) $($_.media_type)") -match "NVMe") { "NVMe" } else { "SATA" } })
+    $diskType = Join-Values ($hw.disks | ForEach-Object { $_.disk_type })
     $diskModel = Join-Values ($hw.disks | ForEach-Object { $_.model })
     $diskSize = Join-Values ($hw.disks | ForEach-Object { $_.size_gb })
 
